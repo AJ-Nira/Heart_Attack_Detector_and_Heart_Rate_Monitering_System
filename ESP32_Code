@@ -1,0 +1,227 @@
+#include <Wire.h>
+#include "MAX30105.h"  // SparkFun MAX3010x library for MAX30102/30105
+#include "heartRate.h"  // Heart rate algorithm library
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <WiFi.h>
+#include <HTTPClient.h>
+
+// OLED display width and height
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET -1
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+// MAX30105 sensor object
+MAX30105 particleSensor;
+
+#define REPORTING_PERIOD_MS 1000
+#define BUZZER_PIN 13          // GPIO pin for the buzzer
+#define PANIC_BUTTON_PIN 12    // GPIO pin for the panic button
+
+long lastBeat = 0;             // Time at which the last beat occurred
+float beatsPerMinute;
+float beatAvg;
+bool heartAttackAlert = false;  // Flag for heart attack alert
+
+uint32_t tsLastReport = 0;     // To track the last report time
+
+// Counter for out-of-range readings
+int outOfRangeCount = 0;
+const int maxOutOfRangeCount = 5;  // Threshold for consecutive out-of-range readings
+
+// Wi-Fi credentials (replace with your own credentials)
+const char* ssid = "your_SSID";  // Replace with your WiFi SSID
+const char* password = "your_PASSWORD";  // Replace with your WiFi password
+
+// Telegram Bot Token (replace with your own token)
+const char* botToken = "your_BOT_TOKEN";  // Replace with your bot token
+
+// Two Telegram Chat IDs (replace with your own chat IDs)
+const char* chatID1 = "your_CHAT_ID1";  // Replace with your first chat ID
+const char* chatID2 = "your_CHAT_ID2";  // Replace with your second chat ID
+
+// Flag to prevent multiple alerts
+bool telegramAlertSent = false;
+
+void setup() {
+  Serial.begin(115200);
+
+  // Initialize OLED display
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    Serial.println("SSD1306 allocation failed");
+    while (1);  // Stop if OLED initialization fails
+  }
+
+  // Initialize MAX30105 sensor
+  if (!particleSensor.begin(Wire, I2C_SPEED_FAST)) {
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.println("MAX30105 not found");
+    display.display();
+    Serial.println("MAX30105 was not found. Check wiring.");
+    while (1);  // Stop if sensor is not detected
+  }
+
+  // Setup sensor
+  particleSensor.setup();  // Initialize sensor with default settings
+  particleSensor.setPulseAmplitudeRed(0x0A);  // Set IR LED current: ~7mA
+  particleSensor.setPulseAmplitudeGreen(0);   // Green LED off (not needed)
+
+  // Display instruction
+  display.clearDisplay();
+  display.setCursor(0, 0);
+  display.println("Place your finger on the sensor.");
+  display.display();
+
+  Serial.println("Place your finger on the sensor.");
+
+  // Initialize buzzer and panic button
+  pinMode(BUZZER_PIN, OUTPUT);
+  digitalWrite(BUZZER_PIN, LOW);  // Start with buzzer off
+
+  pinMode(PANIC_BUTTON_PIN, INPUT_PULLUP);  // Use internal pull-up resistor
+
+  // Connect to Wi-Fi
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(1000);
+    Serial.println("Connecting to WiFi...");
+  }
+  Serial.println("Connected to WiFi");
+}
+
+void sendTelegramMessage(String message) {
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+
+    // Send message to first chat
+    String url1 = "https://api.telegram.org/bot" + String(botToken) + "/sendMessage?chat_id=" + String(chatID1) + "&text=" + message;
+    http.begin(url1);
+    int httpResponseCode1 = http.GET();
+
+    if (httpResponseCode1 > 0) {
+      Serial.println("Message sent to Chat 1");
+    } else {
+      Serial.print("Error sending to Chat 1. HTTP Response code: ");
+      Serial.println(httpResponseCode1);
+    }
+
+    // Send message to second chat
+    String url2 = "https://api.telegram.org/bot" + String(botToken) + "/sendMessage?chat_id=" + String(chatID2) + "&text=" + message;
+    http.begin(url2);
+    int httpResponseCode2 = http.GET();
+
+    if (httpResponseCode2 > 0) {
+      Serial.println("Message sent to Chat 2");
+    } else {
+      Serial.print("Error sending to Chat 2. HTTP Response code: ");
+      Serial.println(httpResponseCode2);
+    }
+
+    http.end();
+  } else {
+    Serial.println("Error: Not connected to WiFi");
+  }
+}
+
+void handleNearbyAlert() {
+  // Buzzer, display alerts for heart attack
+  digitalWrite(BUZZER_PIN, HIGH);  // Turn on the buzzer
+
+  // Display on OLED
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setCursor(0, 0);
+  display.setTextColor(SSD1306_WHITE, SSD1306_BLACK);  // Inverse color for alert
+  display.println("HEART ATTACK ALERT!");
+  display.display();
+  Serial.println("HEART ATTACK ALERT!");
+
+  delay(2000);  // Nearby alert for 2 seconds
+  digitalWrite(BUZZER_PIN, LOW);  // Turn off the buzzer
+}
+
+void loop() {
+  long irValue = particleSensor.getIR();  // Get raw IR data
+  
+  // Check if the panic button is pressed
+  if (digitalRead(PANIC_BUTTON_PIN) == LOW) {  // Button pressed
+    Serial.println("Panic button pressed!");
+    handleNearbyAlert();  // Trigger nearby alert first
+    sendTelegramMessage("Panic Alert: Immediate assistance required!");  // Then send Telegram alert
+    return;  // Exit loop after handling panic button
+  }
+
+  // Check if a finger is placed on the sensor
+  if (irValue > 50000) {
+    // Detect heartbeat
+    if (checkForBeat(irValue)) {
+      long delta = millis() - lastBeat;
+      lastBeat = millis();
+
+      beatsPerMinute = 60 / (delta / 1000.0);  // Calculate BPM
+
+      // Filter unrealistic BPM values
+      if (beatsPerMinute > 20 && beatsPerMinute < 255) {
+        beatAvg = (beatAvg * 0.9) + (beatsPerMinute * 0.1);  // Moving average
+      }
+
+      // Check for heart attack conditions
+      if (beatsPerMinute > 120 || beatsPerMinute < 50) {
+        outOfRangeCount++;  // Increment counter for out-of-range readings
+        if (outOfRangeCount >= maxOutOfRangeCount && !heartAttackAlert) {  // Trigger alert after 5 consecutive readings
+          heartAttackAlert = true;
+
+          // Handle nearby alert first
+          handleNearbyAlert();
+
+          // Then send Telegram alert
+          if (!telegramAlertSent) {
+            sendTelegramMessage("Heart Attack Alert: BPM out of range for 5 consecutive readings!");
+            telegramAlertSent = true;
+          }
+        }
+      } else {
+        outOfRangeCount = 0;  // Reset counter if BPM is in range
+        heartAttackAlert = false;
+        telegramAlertSent = false;  // Allow future alerts
+      }
+
+      // Display BPM and alert status on OLED
+      display.clearDisplay();
+      display.setTextSize(1);
+      display.setCursor(0, 0);
+      display.println("Heart Rate Monitor");
+
+      display.setTextSize(2);
+      display.setCursor(0, 16);
+      display.print("BPM: ");
+      display.println(beatsPerMinute);
+
+      display.setTextSize(1);
+      display.setCursor(0, 40);
+      display.print("Avg BPM: ");
+      display.println(beatAvg);
+
+      display.display();
+    }
+  } else {
+    Serial.println("No finger detected.");
+
+    // Display message on OLED
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setCursor(0, 0);
+    display.println("No finger detected");
+    display.display();
+
+    // Turn off buzzer if no finger is detected
+    digitalWrite(BUZZER_PIN, LOW);
+  }
+
+  // Report the BPM every second
+  if (millis() - tsLastReport > REPORTING_PERIOD_MS) {
+    tsLastReport = millis();
+  }
+}
