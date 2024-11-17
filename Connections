@@ -1,0 +1,28 @@
+MAX30105 (Pulse Oximeter and Heart Rate Sensor):
+
+VCC: Connect to 5V (or 3.3V depending on your board specifications).
+GND: Connect to GND.
+SCL: Connect to SCL pin on the microcontroller (e.g., GPIO 22 on an ESP32).
+SDA: Connect to SDA pin on the microcontroller (e.g., GPIO 21 on an ESP32).
+
+OLED Display (SSD1306):
+
+VCC: Connect to 3.3V or 5V depending on your OLED module.
+GND: Connect to GND.
+SCL: Connect to SCL pin (same as the MAX30105 SCL pin).
+SDA: Connect to SDA pin (same as the MAX30105 SDA pin).
+
+Buzzer (for Heart Attack Alert):
+
+One leg: Connect to GPIO 13 (or any available pin on your microcontroller).
+Other leg: Connect to GND.
+
+Panic Button:
+
+One leg: Connect to GPIO 12 (or any available input pin on the microcontroller).
+Other leg: Connect to GND.
+Set the button with an internal pull-up resistor, so when pressed, the input reads LOW.
+
+Wi-Fi (ESP32):
+
+The Wi-Fi module is already built into the ESP32 (or ESP8266) board, so no extra connections are needed for Wi-Fi. You just need to configure the SSID and password in the code.
